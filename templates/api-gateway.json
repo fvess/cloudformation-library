@@ -1,0 +1,144 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Creates and deploys a REST API.",
+
+    "Parameters": {
+        "APIName": {
+            "Type": "String",
+            "Description": "Name of the REST API to be created."
+        },
+        "APIStage": {
+            "Type": "String",
+            "Description": "Stage name of the REST API to be deployed."
+        },
+        "APIBucketName": {
+            "Type": "String",
+            "Description": "Bucket name where the OpenAPI JSON file is stored."
+        },
+        "APIFileName": {
+            "Type": "String",
+            "Description": "File name of the OpenAPI JSON file."
+        },
+        "DailyLimit": {
+            "Type": "String",
+            "Description": "Nmber of maximum API requests per day."
+        },
+        "BurstLimit": {
+            "Type": "String",
+            "Description": "Number of maximum API requests over a short period."
+        },
+        "RateLimit": {
+            "Type": "String",
+            "Description": "Number of maximum API requests over an extended period."
+        }
+    },
+
+    "Resources": {
+        "API": {
+            "Type": "AWS::ApiGateway::RestApi",
+            "Properties": {
+                "Name": {"Ref": "APIName"},
+                "FailOnWarnings": true,
+                "BodyS3Location": {
+                    "Bucket": {"Ref": "APIBucketName"},
+                    "Key": {"Ref": "APIFileName"}
+                }
+            }
+        }, 
+        "APIDeployment": {
+            "Type": "AWS::ApiGateway::Deployment",
+            "DependsOn": ["API", "APIAccount"],
+            "Properties": {
+                "RestApiId": {"Ref": "API"},
+                "StageName": {"Ref": "APIStage"}
+            }
+        },
+        "APIKey": {
+            "Type": "AWS::ApiGateway::ApiKey",
+            "DependsOn": "APIDeployment",
+            "Properties": {
+                "Name": {"Fn::Sub": "${APIName}-${APIStage}-api-key"},
+                "Enabled": true,
+                "StageKeys": [{
+                    "RestApiId": {"Ref": "API"},
+                    "StageName": {"Ref": "APIStage"}
+                }]
+            }
+        },
+        "APIUsagePlan": {
+            "Type": "AWS::ApiGateway::UsagePlan",
+            "DependsOn": "APIKey",
+            "Properties": {
+                "UsagePlanName": {"Fn::Sub": "${APIName}-${APIStage}-api-usage"},
+                "ApiStages": [{
+                    "ApiId": {"Ref": "APIName"},
+                    "Stage": {"Ref": "APIStage"}
+                }],
+                "Quota": {
+                    "Limit": {"Ref": "DailyLimit"},
+                    "Period": "DAY"
+                },
+                "Throttle": {
+                    "BurstLimit": {"Ref": "BurstLimit"},
+                    "RateLimit": {"Ref": "RateLimit"}
+                }
+            }
+        },
+        "APIUsagePlanKey": {
+            "Type": "AWS::ApiGateway::UsagePlanKey",
+            "DependsOn": "APIUsagePlan",
+            "Properties": {
+                "KeyType": "API_KEY",
+                "KeyId": {"Ref": "APIKey"},
+                "UsagePlanId": {"Ref": "APIUsagePlan"}
+            }
+        },
+        "APIRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "Path": "/",
+                "ManagedPolicyArns": ["arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"],
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": {"Service": "apigateway.amazonaws.com"},
+                        "Action": "sts:AssumeRole"
+                    }]
+                }
+            }
+        },
+        "APIAccount": {
+            "Type": "AWS::ApiGateway::Account",
+            "Properties": {
+                "CloudWatchRoleArn": {"Fn::GetAtt": ["APIRole", "Arn"]}
+            }
+        }
+    },
+
+    "Outputs": {
+        "APIEndpoint": {
+            "Value": {"Fn::Sub": "https://${API}.execute-api.${AWS::Region}.amazonaws.com"},
+            "Export": {"Name": {"Fn::Sub": "${AWS::StackName}-api-endpoint"}}
+        }
+    },
+
+    "Metadata": {
+        "AWS::CloudFormation::Interface": {
+            "ParameterGroups": [
+                { "Label": {"default": "General"}, "Parameters": ["APIName", "APIStage"] },
+                { "Label": {"default": "Definition"}, "Parameters": ["APIBucketName", "APIFileName"] },
+                { "Label": {"default": "Usage"}, "Parameters": ["DailyLimit", "BurstLimit", "RateLimit"] }
+            ],
+            "ParameterLabels": {
+                "APIName": {"default": "API Name"},
+                "APIStage": {"default": "API Stage"},
+                "APIBucketName": {"default": "OpenAPI Bucket Name"},
+                "APIFileName": {"default": "OpenAPI File Name"},
+                "DailyLimit": {"default": "Daily Limit"},
+                "BurstLimit": {"default": "Burst Limit"},
+                "RateLimit": {"default": "Rate Limit"}
+            }
+        }
+    }
+}

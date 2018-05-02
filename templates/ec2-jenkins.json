@@ -1,0 +1,248 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Creates an EC2 Instance running Jenkins.",
+
+    "Parameters": {
+        "InstanceType": {
+            "Type": "String",
+            "Default": "t2.micro",
+            "ConstraintDescription": "Must be a valid EC2 instance type.",
+            "AllowedValues": [
+                "t2.nano",   "t2.micro",  "t2.small",   "t2.medium",  "t2.large",
+                "m5.large",  "m5.xlarge", "m5.2xlarge", "m5.4xlarge", "m5.12xlarge", "m5.24xlarge", "x1.32xlarge",
+                "m4.large",  "m4.xlarge", "m4.2xlarge", "m4.4xlarge", "m4.10xlarge",
+                "c5.large",  "c5.xlarge", "c5.2xlarge", "c5.4xlarge", "c5.9xlarge", "c5.18xlarge",
+                "c4.large",  "c4.xlarge", "c4.2xlarge", "c4.4xlarge", "c4.8xlarge",
+                "r4.large",  "r4.xlarge", "r4.2xlarge", "r4.4xlarge", "r4.8xlarge", "r4.16xlarge"
+            ]
+        },
+        "InstanceKey": {
+            "Type": "AWS::EC2::KeyPair::KeyName"
+        },
+        "InstanceStorage": {
+            "Type": "String",
+            "Default": "10",
+            "Description": "Instance storage size in gigabytes.",
+            "ConstraintDescription": "Must be between 8GB and 1024GB."
+        },
+        "SSHAccess": {
+            "Type": "String",
+            "Default": "0.0.0.0/0",
+            "Description": "IP address from which the instance will be accessible via SSH.",
+            "AllowedPattern": "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]).){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$",
+            "ConstraintDescription": "Must be a valid IP address or CIDR IP block."
+        },
+        "JenkinsAccess": {
+            "Type": "String",
+            "Default": "0.0.0.0/0",
+            "Description": "IP address from which the load balancer will be accessible on 8080.",
+            "AllowedPattern": "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]).){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$",
+            "ConstraintDescription": "Must be a valid IP address or CIDR IP block."
+        },
+        "VPC": {
+            "Type": "AWS::EC2::VPC::Id"
+        },
+        "Subnets": {
+            "Type": "List<AWS::EC2::Subnet::Id>"
+        }
+    },
+
+    "Mappings": {
+        "RegionAMI": {
+            "us-east-1": {"HVM": "ami-aa2ea6d0"},
+            "us-east-2": {"HVM": "ami-82f4dae7"},
+            "us-west-1": {"HVM": "ami-45ead225"},
+            "us-west-2": {"HVM": "ami-0def3275"},
+            "eu-west-1": {"HVM": "ami-8fd760f6"},
+            "eu-west-2": {"HVM": "ami-fcc4db98"},
+            "eu-central-1": {"HVM": "ami-df8406b0"},
+            "ca-central-1": {"HVM": "ami-018b3065"}
+        }
+    },
+
+    "Resources": {
+        "LaunchConfiguration": {
+            "Type": "AWS::AutoScaling::LaunchConfiguration",
+            "Properties": {
+                "ImageId": {"Fn::FindInMap": ["RegionAMI", {"Ref": "AWS::Region"}, "HVM"]},
+                "InstanceType": {"Ref": "InstanceType"},
+                "KeyName": {"Ref": "InstanceKey"},
+                "IamInstanceProfile": {"Ref": "InstanceProfile"},
+                "SecurityGroups": [{"Ref": "InstanceSecurityGroup"}],
+                "BlockDeviceMappings": [{
+                    "DeviceName": "/dev/sda1",
+                    "Ebs": {"VolumeSize": {"Ref": "InstanceStorage"}, "VolumeType": "gp2"}
+                }],
+                "UserData": {"Fn::Base64": {"Fn::Join": ["", [
+                    "#!/bin/bash -x\n",
+                    "exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1\n",
+
+                    "# INSTALL GENERAL TOOLS\n",
+                    "apt-get update && apt-get -y install build-essential software-properties-common make zip unzip curl wget\n",
+
+                    "# INSTALL DEV TOOLS\n",
+                    "curl -sL https://deb.nodesource.com/setup_8.x | bash -\n",
+                    "apt-get update && apt-get -y install default-jdk nodejs ruby-full python python-pip mysql-client maven ant git\n",
+
+                    "# INSTALL AWS TOOLS\n",
+                    "pip install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz\n",
+                    "pip install awscli\n",
+                    "aws configure set default.region ", {"Ref": "AWS::Region"}, "\n\n",
+
+                    "# RUN INIT\n",
+                    "cfn-init -v",
+                    " --resource  LaunchConfiguration",
+                    " --stack ",  {"Ref": "AWS::StackName"},
+                    " --region ", {"Ref": "AWS::Region"}, "\n\n",
+
+                    "# INSTALL DOCKER\n",
+                    "apt-get install -y apt-transport-https ca-certificates curl gnupg2 software-properties-common\n",
+                    "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -\n",
+                    "add-apt-repository \"deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable\"\n",
+                    "apt-get update && apt-get install -y docker-ce\n",
+                    "usermod -a -G docker ubuntu\n",
+                    "service docker restart\n\n",
+
+                    "# INSTALL JENKINS\n",
+                    "wget -q -O - https://pkg.jenkins.io/debian/jenkins.io.key | apt-key add -\n",
+                    "sh -c 'echo deb http://pkg.jenkins.io/debian-stable binary/ > /etc/apt/sources.list.d/jenkins.list'\n",
+                    "apt-get update && apt-get install -y jenkins\n",
+                    "usermod -a -G docker jenkins\n\n",
+
+                    "# RESTORE BACKUPS\n",
+                    "aws s3 cp s3://", {"Ref": "BackupsBucket"}, "/latest/config.xml /var/lib/jenkins/config.xml\n",
+                    "aws s3 sync s3://", {"Ref": "BackupsBucket"}, "/latest/users /var/lib/jenkins/users\n",
+                    "aws s3 sync s3://", {"Ref": "BackupsBucket"}, "/latest/jobs /var/lib/jenkins/jobs\n",
+                    "aws s3 sync s3://", {"Ref": "BackupsBucket"}, "/latest/plugins /var/lib/jenkins/plugins\n",
+                    "chown -R jenkins:jenkins /var/lib/jenkins\n",
+                    "service jenkins restart\n\n",
+
+                    "# BACKUP CRONJOBS\n",
+                    "echo '#!/bin/sh' > /etc/cron.weekly/jenkins-backups\n",
+                    "chmod +x /etc/cron.weekly/jenkins-backups\n",
+                    "echo 'aws s3 cp /var/lib/jenkins/config.xml s3://", {"Ref": "BackupsBucket"}, "/`date +%Y-%m-%d`/config.xml' >> /etc/cron.weekly/jenkins-backups\n",
+                    "echo 'aws s3 cp --recursive /var/lib/jenkins/users s3://", {"Ref": "BackupsBucket"}, "/`date +%Y-%m-%d`/users' >> /etc/cron.weekly/jenkins-backups\n",
+                    "echo 'aws s3 cp --recursive /var/lib/jenkins/jobs s3://", {"Ref": "BackupsBucket"}, "/`date +%Y-%m-%d`/jobs' >> /etc/cron.weekly/jenkins-backups\n",
+                    "echo 'aws s3 cp --recursive /var/lib/jenkins/plugins s3://", {"Ref": "BackupsBucket"}, "/`date +%Y-%m-%d`/plugins' >> /etc/cron.weekly/jenkins-backups\n",
+                    "echo 'aws s3 cp /var/lib/jenkins/config.xml s3://", {"Ref": "BackupsBucket"}, "/latest/config.xml' >> /etc/cron.weekly/jenkins-backups\n",
+                    "echo 'aws s3 sync /var/lib/jenkins/users s3://", {"Ref": "BackupsBucket"}, "/latest/users' >> /etc/cron.weekly/jenkins-backups\n",
+                    "echo 'aws s3 sync /var/lib/jenkins/jobs s3://", {"Ref": "BackupsBucket"}, "/latest/jobs' >> /etc/cron.weekly/jenkins-backups\n",
+                    "echo 'aws s3 sync /var/lib/jenkins/plugins s3://", {"Ref": "BackupsBucket"}, "/latest/plugins' >> /etc/cron.weekly/jenkins-backups\n\n",
+
+                    "# CLEANUP CRONJOBS\n",
+                    "echo '#!/bin/sh' > /etc/cron.weekly/docker-cleanup\n",
+                    "chmod +x /etc/cron.weekly/docker-cleanup\n",
+                    "echo 'sudo docker rm `sudo docker ps -aq`' >> /etc/cron.weekly/docker-cleanup\n",
+                    "echo 'sudo docker rmi `sudo docker images -aq`' >> /etc/cron.weekly/docker-cleanup\n"
+                ]]}}
+            }
+        },
+        "AutoScalingGroup": {
+            "Type": "AWS::AutoScaling::AutoScalingGroup",
+            "Properties": {
+                "Tags": [{"Key": "Name", "Value": "jenkins", "PropagateAtLaunch": true}],
+                "LaunchConfigurationName": {"Ref": "LaunchConfiguration"},
+                "LoadBalancerNames": [{"Ref": "LoadBalancer"}],
+                "VPCZoneIdentifier": {"Ref": "Subnets"},
+                "DesiredCapacity": "1",
+                "MaxSize": "1",
+                "MinSize": "1"
+            }
+        },
+        "LoadBalancer": {
+            "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+            "Properties": {
+                "LoadBalancerName": "elb-jenkins",
+                "SecurityGroups": [{"Ref": "BalancerSecurityGroup"}],
+                "AvailabilityZones": {"Fn::GetAZs": {"Ref": "AWS::Region"}},
+                "Listeners": [{
+                    "Protocol": "HTTP",
+                    "LoadBalancerPort": "80",
+                    "InstancePort": "8080"
+                }],
+                "HealthCheck": {
+                    "Target": "TCP:8080",
+                    "Interval": "30",
+                    "Timeout": "5",
+                    "HealthyThreshold": "3",
+                    "UnhealthyThreshold": "5"
+                }
+            }
+        },
+        "InstanceSecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupName": "sg-ec2-jenkins",
+                "GroupDescription": "Enables SSH (22) and Jenkins (8080)",
+                "VpcId": {"Ref": "VPC"},
+                "SecurityGroupIngress": [
+                    { "IpProtocol": "tcp", "FromPort":   "22", "ToPort":   "22", "CidrIp": {"Ref": "SSHAccess"} },
+                    { "IpProtocol": "tcp", "FromPort": "8080", "ToPort": "8080", "SourceSecurityGroupId": {"Ref": "BalancerSecurityGroup"} }
+                ]
+            }
+        },
+        "BalancerSecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupName": "sg-elb-jenkins",
+                "GroupDescription": "Enables HTTP (80)",
+                "VpcId": {"Ref": "VPC"},
+                "SecurityGroupIngress": [
+                    { "IpProtocol": "tcp", "FromPort": "80", "ToPort": "80", "CidrIp": {"Ref": "JenkinsAccess"} }
+                ]
+            }
+        },
+        "BackupsBucket": {
+            "Type": "AWS::S3::Bucket",
+            "Properties": {
+                "BucketName": {"Fn::Sub": "${AWS::StackName}-backups"}
+            }
+        },
+        "InstanceProfile": {
+            "Type": "AWS::IAM::InstanceProfile",
+            "Properties": {
+                "Path": "/",
+                "Roles": [{"Ref": "InstanceRole"}]
+            }
+        },
+        "InstanceRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "Path": "/",
+                "Policies": [{
+                    "PolicyName": "JenkinsPolicy",
+                    "PolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [{
+                            "Effect": "Allow",
+                            "Action": "s3:*",
+                            "Resource": {"Fn::Sub": "arn:aws:s3:::${BackupsBucket}/*"}
+                        }]
+                    }
+                }]
+            }
+        }
+    },
+
+    "Outputs": {
+        "Endpoint": {
+            "Value": {"Fn::GetAtt": ["LoadBalancer", "DNSName"]},
+            "Export": {"Name": {"Fn::Sub": "${AWS::StackName}-jenkins-endpoint"}}
+        }
+    },
+
+    "Metadata": {
+        "AWS::CloudFormation::Interface": {
+            "ParameterGroups": [
+                { "Label": {"default": "Instance"}, "Parameters": ["InstanceType", "InstanceKey", "InstanceStorage", "InstanceAccess"] },
+                { "Label": {"default": "Network"}, "Parameters": ["VPC", "Subnets"] }
+            ],
+            "ParameterLabels": {
+                "InstanceType": {"default": "Instance Type"},
+                "InstanceKey": {"default": "Instance Key"},
+                "InstanceStorage": {"default": "Instance Storage"},
+                "InstanceAccess": {"default": "Instance Access"}
+            }
+        }
+    }
+}

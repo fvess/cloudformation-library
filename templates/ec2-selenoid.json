@@ -1,0 +1,158 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Creates a cluster of EC2 Instances running Selenoid.",
+
+    "Parameters": {
+        "InstanceType": {
+            "Type": "String",
+            "Default": "t2.micro",
+            "ConstraintDescription": "Must be a valid EC2 instance type.",
+            "AllowedValues": [
+                "t2.nano",   "t2.micro",  "t2.small",   "t2.medium",  "t2.large",
+                "m5.large",  "m5.xlarge", "m5.2xlarge", "m5.4xlarge", "m5.12xlarge", "m5.24xlarge", "x1.32xlarge",
+                "m4.large",  "m4.xlarge", "m4.2xlarge", "m4.4xlarge", "m4.10xlarge",
+                "c5.large",  "c5.xlarge", "c5.2xlarge", "c5.4xlarge", "c5.9xlarge", "c5.18xlarge",
+                "c4.large",  "c4.xlarge", "c4.2xlarge", "c4.4xlarge", "c4.8xlarge",
+                "r4.large",  "r4.xlarge", "r4.2xlarge", "r4.4xlarge", "r4.8xlarge", "r4.16xlarge"
+            ]
+        },
+        "InstanceKey": {
+            "Type": "AWS::EC2::KeyPair::KeyName"
+        },
+        "InstanceStorage": {
+            "Type": "String",
+            "Description": "Instance storage size in gigabytes.",
+            "ConstraintDescription": "Must be between 8GB and 1024GB."
+        },
+        "InstanceAccess": {
+            "Type": "String",
+            "Description": "IP address from which the instance will be accessible via SSH.",
+            "AllowedPattern": "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]).){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$",
+            "ConstraintDescription": "Must be a valid CIDR IP block and a valid IP range for the VPC."
+        },
+        "ClusterSize": {
+            "Type": "String",
+            "Description": "Number of nodes to be provisioned within the cluster."
+        },
+        "VPC": {
+            "Type": "AWS::EC2::VPC::Id"
+        },
+        "Subnets": {
+            "Type": "List<AWS::EC2::Subnet::Id>"
+        }
+    },
+
+    "Mappings": {
+        "RegionAMI": {
+            "us-east-1": {"HVM": "ami-aa2ea6d0"},
+            "us-east-2": {"HVM": "ami-82f4dae7"},
+            "us-west-1": {"HVM": "ami-45ead225"},
+            "us-west-2": {"HVM": "ami-0def3275"},
+            "eu-west-1": {"HVM": "ami-8fd760f6"},
+            "eu-west-2": {"HVM": "ami-fcc4db98"},
+            "eu-central-1": {"HVM": "ami-df8406b0"},
+            "ca-central-1": {"HVM": "ami-018b3065"}
+        }
+    },
+
+    "Resources": {
+        "LaunchConfiguration": {
+            "Type": "AWS::AutoScaling::LaunchConfiguration",
+            "Properties": {
+                "ImageId": {"Fn::FindInMap": ["RegionAMI", {"Ref": "AWS::Region"}, "HVM"]},
+                "InstanceType": {"Ref": "InstanceType"},
+                "KeyName": {"Ref": "InstanceKey"},
+                "IamInstanceProfile": {"Ref": "InstanceProfile"},
+                "SecurityGroups": [{"Ref": "InstanceSecurityGroup"}],
+                "BlockDeviceMappings": [{
+                    "DeviceName": "/dev/sda1",
+                    "Ebs": {"VolumeSize": {"Ref": "InstanceStorage"}, "VolumeType": "gp2"}
+                }],
+                "UserData": {"Fn::Base64": {"Fn::Join": ["", [
+                    "#!/bin/bash -x\n",
+                    "exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1\n",
+
+                    "# INSTALL GENERAL TOOLS\n",
+                    "apt-get update && apt-get -y install build-essential software-properties-common make zip unzip git curl wget\n",
+
+                    "# INSTALL DOCKER\n",
+                    "apt-get install -y apt-transport-https ca-certificates curl gnupg2 software-properties-common\n",
+                    "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -\n",
+                    "add-apt-repository \"deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable\"\n",
+                    "apt-get update && apt-get install -y docker-ce\n",
+                    "usermod -a -G docker ubuntu\n",
+                    "service docker restart\n\n",
+
+                    "# INSTALL DOCKER-COMPOSE\n",
+                    "curl -L https://github.com/docker/compose/releases/download/1.18.0/docker-compose-`uname -s`-`uname -m` -o /usr/local/bin/docker-compose\n",
+                    "chmod +x /usr/local/bin/docker-compose\n",
+
+                    "# INSTALL SELENOID\n",
+                    "docker pull selenoid/chrome:62.0 && docker pull selenoid/firefox:57.0\n",
+                    "git clone https://github.com/fvess/selenoid-docker && cd selenoid-docker\n",
+                    "docker-compose -f selenoid.yaml up -d\n"
+                ]]}}
+            }
+        },
+        "AutoScalingGroup": {
+            "Type": "AWS::AutoScaling::AutoScalingGroup",
+            "Properties": {
+                "Tags": [{"Key": "Name", "Value": "selenoid", "PropagateAtLaunch": true}],
+                "LaunchConfigurationName": {"Ref": "LaunchConfiguration"},
+                "VPCZoneIdentifier": {"Ref": "Subnets"},
+                "DesiredCapacity": {"Ref": "ClusterSize"},
+                "MaxSize": {"Ref": "ClusterSize"},
+                "MinSize": {"Ref": "ClusterSize"}
+            }
+        },
+        "InstanceSecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "Tags": [{"Key": "Name", "Value": "sg-ec2-selenoid"}],
+                "GroupDescription": "Enables SSH (22) and Selenoid (4444)",
+                "VpcId": {"Ref": "VPC"},
+                "SecurityGroupIngress": [
+                    { "IpProtocol": "tcp", "FromPort":   "22", "ToPort":   "22", "CidrIp": {"Ref": "InstanceAccess"} },
+                    { "IpProtocol": "tcp", "FromPort": "4444", "ToPort": "4444", "CidrIp": {"Ref": "InstanceAccess"} }
+                ]
+            }
+        },
+        "InstanceProfile": {
+            "Type": "AWS::IAM::InstanceProfile",
+            "Properties": {
+                "Path": "/",
+                "Roles": [{"Ref": "InstanceRole"}]
+            }
+        },
+        "InstanceRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "Path": "/",
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": {"Service": "ec2.amazonaws.com"},
+                        "Action": "sts:AssumeRole"
+                    }]
+                }
+            }
+        }
+    },
+
+    "Metadata": {
+        "AWS::CloudFormation::Interface": {
+            "ParameterGroups": [
+                { "Label": {"default": "Cluster"}, "Parameters": ["ClusterSize", "InstanceType", "InstanceKey", "InstanceStorage", "InstanceAccess"] },
+                { "Label": {"default": "Network"}, "Parameters": ["VPC", "Subnets"] }
+            ],
+            "ParameterLabels": {
+                "InstanceType": {"default": "Instance Type"},
+                "InstanceKey": {"default": "Instance Key"},
+                "InstanceStorage": {"default": "Instance Storage"},
+                "InstanceAccess": {"default": "Instance Access"},
+                "ClusterSize": {"default": "Cluster Size"}
+            }
+        }
+    }
+}

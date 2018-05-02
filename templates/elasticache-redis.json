@@ -1,0 +1,98 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Creates a ElastiCache Node running Redis inside a VPC.",
+
+    "Parameters": {
+        "NodeType": {
+            "Type": "String",
+            "Default": "cache.t2.small",
+            "ConstraintDescription": "Must be a valid ElastiCache node type.",
+            "AllowedValues": [
+                "cache.t2.micro", "cache.t2.small", "cache.t2.medium",
+                "cache.m3.medium", "cache.m3.large", "cache.m3.xlarge", "cache.m3.2xlarge",
+                "cache.m4.large", "cache.m4.xlarge", "cache.m4.2xlarge", "cache.m4.4xlarge", "cache.m4.10xlarge",
+                "cache.r3.large", "cache.r3.xlarge", "cache.r3.2xlarge", "cache.r3.4xlarge", "cache.r3.8xlarge",
+                "cache.r4.large", "cache.r4.xlarge", "cache.r4.2xlarge", "cache.r4.4xlarge", "cache.r4.8xlarge", "cache.r4.16xlarge"
+            ]
+        },
+        "RedisVersion": {
+            "Type": "String",
+            "Default": "3.2.6",
+            "ConstraintDescription": "Must be a valid Redis version.",
+            "AllowedValues": ["3.2.6", "3.2.4", "2.8.24"]
+        },
+        "RedisPort": {
+            "Type": "Number",
+            "Default": "6379"
+        },
+        "VPC": {
+            "Type": "AWS::EC2::VPC::Id"
+        },
+        "Subnets": {
+            "Type": "List<AWS::EC2::Subnet::Id>"
+        }
+    },
+
+    "Resources": {
+        "Cluster": {
+            "Type": "AWS::ElastiCache::CacheCluster",
+            "Properties": {
+                "Engine": "redis",
+                "EngineVersion": {"Ref": "RedisVersion"},
+                "CacheNodeType": {"Ref": "NodeType"},
+                "NumCacheNodes": "1",
+                "Port": {"Ref": "RedisPort"},
+                "AutoMinorVersionUpgrade": true,
+                "CacheSubnetGroupName": {"Ref": "SubnetGroup"},
+                "VpcSecurityGroupIds": [{"Ref": "SecurityGroup"}]
+            }
+        },
+        "SubnetGroup": {
+            "Type": "AWS::ElastiCache::SubnetGroup",
+            "Properties": {
+                "Description": "Redis Subnet Group",
+                "SubnetIds": {"Ref": "Subnets"}
+            }
+        },
+        "SecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupName": "sg-elasticache-redis",
+                "GroupDescription": "Redis Security Group",
+                "VpcId": {"Ref": "VPC"},
+                "SecurityGroupIngress": [{
+                    "IpProtocol": "TCP",
+                    "FromPort": {"Ref": "RedisPort"},
+                    "ToPort": {"Ref": "RedisPort"},
+                    "CidrIp": "0.0.0.0/0"
+                }]
+            }
+        }
+    },
+
+    "Outputs": {
+        "Endpoint": {
+            "Value": {"Fn::GetAtt": ["Cluster", "RedisEndpoint.Address"]},
+            "Export": {"Name": {"Fn::Sub": "${AWS::StackName}-endpoint"}}
+        },
+        "Port": {
+            "Value": {"Fn::GetAtt": ["Cluster", "RedisEndpoint.Port"]},
+            "Export": {"Name": {"Fn::Sub": "${AWS::StackName}-port"}}
+        }
+    },
+
+    "Metadata": {
+        "AWS::CloudFormation::Interface": {
+            "ParameterGroups": [
+                { "Label": {"default": "Redis"}, "Parameters": ["RedisVersion", "NodeType", "RedisPort"] },
+                { "Label": {"default": "Network"}, "Parameters": ["VPC", "Subnets"] }
+            ],
+            "ParameterLabels": {
+                "RedisVersion": {"default": "Redis Version"},
+                "RedisPort": {"default": "Listening Port"},
+                "RedisRetention": {"default": "Snapshot Retention"},
+                "NodeType": {"default": "Node Type"}
+            }
+        }
+    }
+}
